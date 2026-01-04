@@ -90,35 +90,69 @@ class CreateMovieView(APIView):
             return Response({'error': 'Invalid data'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Detection Logic
-        series_keywords = ['series', 'serial', 'qism', 'season', 'episode', 'part', 'fasl', 'bolum']
-        is_series = any(keyword in description.lower() for keyword in series_keywords)
+        # STRICTER REGEX: Only match keywords if they are whole words.
+        # Removed vague 'series'/'serial' to prevent false positives like "Netflix Series" title without episode info.
+        # Added strict word boundaries \b
+        keywords = r'(qism|season|episode|part|fasl|bolum)'
+        keywords_pattern = rf'\b{keywords}\b'
+        
+        match = re.search(keywords_pattern, description, re.IGNORECASE)
+        is_series = bool(match)
 
         try:
-            if is_series:
-                # Basic name extraction - simplified for reliability
-                # Assuming format like "Series Name x-qism" or similar.
-                # We'll try to find an existing series that matches the description start or create new.
-                
-                # Heuristic: Remove episode indicators and numbers to get "Title"
-                # pattern: (.*)(episode|part|season|qism)(.*)
-                # Updated regex to swallow episode number if it precedes the keyword, and removed 'series'/'serial' from split to avoid cutting title early
-                match = re.search(r'(.+?)\s*(?:\d+)?\s*(-)?\s*(qism|season|episode|part|fasl|bolum)', description, re.IGNORECASE)
-                if match:
-                    series_name = match.group(1).strip()
-                else:
-                    series_name = description[:20] # Fallback
+            series_name = None
+            episode_number = 1
 
+            if is_series:
+                # Attempt to extract Series Name using a robust pattern
+                # Pattern: Starts with (Name), optional space/number, keyword
+                # e.g. "Breaking Bad 1-qism" -> Name: Breaking Bad
+                name_pattern = rf'(.+?)(?:\s+\d+)?[\s-]*\b{keywords}\b'
+                name_match = re.search(name_pattern, description, re.IGNORECASE)
+                
+                if name_match:
+                    series_name = name_match.group(1).strip()
+                    # Clean common separators from the end of name
+                    series_name = series_name.strip('-.#:| ')
+                else:
+                    # Extraction failed. Even if keyword matched, we couldn't parse the name.
+                    # Fallback: Treat as MOVIE to be safe (avoid grouping random stuff).
+                    is_series = False
+
+                if is_series:
+                    # Extract Episode Number
+                    # Look for number near the keyword
+                    # 1. Number immediately preceding/following keyword "1-qism" or "qism 1"
+                    episode_match = re.search(rf'(\d+)\s*[-]?\s*{keywords}', description, re.IGNORECASE)
+                    if not episode_match:
+                         # Try number after keyword "Episode 1"
+                         episode_match = re.search(rf'{keywords}\s*[-]?\s*(\d+)', description, re.IGNORECASE)
+                    
+                    if episode_match:
+                        # Depending on which group caught the digits. 
+                        # re.search returns groups.
+                        
+                        # Re-run specific regexes for extraction
+                        ep_p1 = re.search(rf'(\d+)\s*[-]?\s*{keywords}', description, re.IGNORECASE)
+                        ep_p2 = re.search(rf'{keywords}\s*[-]?\s*(\d+)', description, re.IGNORECASE)
+                        
+                        if ep_p1:
+                            episode_number = int(ep_p1.group(1))
+                        elif ep_p2:
+                            # Note: `keywords` regex has one capturing group `(...)`. 
+                            # So `rf'{keywords}...(\d+)'` means group 1 is keyword, group 2 is digit.
+                            episode_number = int(ep_p2.group(2))
+                        else:
+                             # Fallback to any number check if desperate, or default 1
+                             num_match = re.search(r'(\d+)', description)
+                             episode_number = int(num_match.group(1)) if num_match else 1
+                    else:
+                        num_match = re.search(r'(\d+)', description)
+                        episode_number = int(num_match.group(1)) if num_match else 1
+
+            if is_series and series_name:
                 # Clean up series name (remove markdown bolding etc)
                 series_name = series_name.replace('*', '').strip()
-                
-                # Check for episode number
-                episode_match = re.search(r'(\d+)\s*(-)?\s*(qism|bolum|episode|part)', description, re.IGNORECASE)
-                if episode_match:
-                    episode_number = int(episode_match.group(1))
-                else:
-                    # Try finding any number
-                    num_match = re.search(r'(\d+)', description)
-                    episode_number = int(num_match.group(1)) if num_match else 1
 
                 # Find or Create Series
                 series, created = Series.objects.get_or_create(name=series_name)
@@ -130,8 +164,6 @@ class CreateMovieView(APIView):
                     series.code = max(max_movie, max_series) + 1
                     series.save()
                 
-                # Check if episode fails (e.g. duplicate), though we don't have unique constraint on (series, episode_number) yet.
-                # Just create it.
                 Episode.objects.create(
                     series=series,
                     file_id=file_id,
@@ -259,5 +291,3 @@ class TopMoviesView(APIView):
         top_movies = Movie.objects.all().order_by('-rate')[:5]
         serializer = MovieSerializer(top_movies, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
-

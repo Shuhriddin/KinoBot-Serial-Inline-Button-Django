@@ -61,4 +61,3 @@ class Episode(models.Model):
 
     def __str__(self):
         return f"{self.series.name} - Episode {self.episode_number}"
-
